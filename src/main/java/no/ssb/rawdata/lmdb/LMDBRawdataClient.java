@@ -82,6 +82,7 @@ class LMDBRawdataClient implements RawdataClient {
             for (LMDBBackend lmdbBackend : backendByTopic.values()) {
                 lmdbBackend.close();
             }
+            backendByTopic.clear();
         }
     }
 }
