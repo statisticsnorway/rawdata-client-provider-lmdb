@@ -7,6 +7,7 @@ import no.ssb.rawdata.api.RawdataProducer;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -14,13 +15,15 @@ import java.util.function.Consumer;
 
 class LMDBRawdataProducer implements RawdataProducer {
 
+    final int producerId;
     final String topic;
     final LMDBBackend lmdbBackend;
     final Map<String, LMDBRawdataMessage> buffer = new ConcurrentHashMap<>();
     final AtomicBoolean closed = new AtomicBoolean(false);
     final Consumer<LMDBRawdataProducer> closeAction;
 
-    LMDBRawdataProducer(LMDBBackend lmdbBackend, String topic, Consumer<LMDBRawdataProducer> closeAction) {
+    LMDBRawdataProducer(int producerId, LMDBBackend lmdbBackend, String topic, Consumer<LMDBRawdataProducer> closeAction) {
+        this.producerId = producerId;
         this.lmdbBackend = lmdbBackend;
         this.topic = topic;
         this.closeAction = closeAction;
@@ -113,9 +116,24 @@ class LMDBRawdataProducer implements RawdataProducer {
     }
 
     @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        LMDBRawdataProducer that = (LMDBRawdataProducer) o;
+        return producerId == that.producerId &&
+                topic.equals(that.topic);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(producerId, topic);
+    }
+
+    @Override
     public String toString() {
         return "LMDBRawdataProducer{" +
-                "topic='" + topic + '\'' +
+                "producerId=" + producerId +
+                ", topic='" + topic + '\'' +
                 '}';
     }
 

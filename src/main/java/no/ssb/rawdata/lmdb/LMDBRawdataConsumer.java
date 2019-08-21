@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -19,6 +20,7 @@ class LMDBRawdataConsumer implements RawdataConsumer {
 
     static final Logger log = LoggerFactory.getLogger(LMDBRawdataConsumer.class);
 
+    final int consumerId;
     final Lock lock = new ReentrantLock();
     final Condition condition = lock.newCondition();
     final String topic;
@@ -27,7 +29,8 @@ class LMDBRawdataConsumer implements RawdataConsumer {
     final AtomicBoolean closed = new AtomicBoolean(false);
     final Consumer<LMDBRawdataConsumer> closeAction;
 
-    public LMDBRawdataConsumer(LMDBBackend lmdbBackend, String topic, String initialPosition, Consumer<LMDBRawdataConsumer> closeAction) {
+    public LMDBRawdataConsumer(int consumerId, LMDBBackend lmdbBackend, String topic, String initialPosition, Consumer<LMDBRawdataConsumer> closeAction) {
+        this.consumerId = consumerId;
         this.lmdbBackend = lmdbBackend;
         this.topic = topic;
         this.closeAction = closeAction;
@@ -87,9 +90,24 @@ class LMDBRawdataConsumer implements RawdataConsumer {
     }
 
     @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        LMDBRawdataConsumer that = (LMDBRawdataConsumer) o;
+        return consumerId == that.consumerId &&
+                topic.equals(that.topic);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(consumerId, topic);
+    }
+
+    @Override
     public String toString() {
         return "LMDBRawdataConsumer{" +
-                "topic='" + topic + '\'' +
+                "consumerId=" + consumerId +
+                ", topic='" + topic + '\'' +
                 '}';
     }
 
