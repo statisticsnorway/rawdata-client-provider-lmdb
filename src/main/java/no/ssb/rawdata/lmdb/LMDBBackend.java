@@ -24,6 +24,35 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+
+/**
+ * This classes encapsulates modelling and methods needed in Lightning Memory-Mapped Database (LMDB) to build rawdata
+ * producers and consumers.
+ * <p><p>
+ * The model:
+ * Instances of this class represent a single "stream" and are tied to a specific file-system directory
+ * (path) at construction time which is where the corresponding LMDB data and lock files live.
+ * <p><p>
+ * This stream uses 3 databases (ordered key-value stores) internally to represent the rawdata sequence and
+ * content:
+ * <p>
+ * <ul>
+ * <li>data
+ * <ul>Key<li>ULID. offset: 0, length: 16 bytes, encoding: ULID.Value binary encoding</li>
+ * <li>Name, offset: 16, length: variable, encoding: UTF-8</li></ul>
+ * <ul>Value<li>byte[]. offset: 0, length: variable, encoding: binary</li></ul>
+ * </li>
+ * <p>
+ * <li>sequence</li>
+ * <ul>Key<li>ULID. offset: 0, length: 16 bytes, encoding: ULID.Value binary encoding</li></ul>
+ * <ul>Value<li>Position. offset: 0, length: variable, encoding: UTF-8</li></ul>
+ * <p>
+ * <li>index</li>
+ * <ul>Key<li>Position. offset: 0, length: variable, encoding: UTF-8</li></ul>
+ * <ul>Value<li>ULID. offset: 0, length: 16 bytes, encoding: ULID.Value binary encoding</li></ul>
+ * </ul>
+ * <p>
+ */
 public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
 
     final ULID ulid = new ULID();
@@ -57,6 +86,9 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
         index = env.openDbi("index", DbiFlags.MDB_CREATE);
     }
 
+    /**
+     * Drop all 3 databases. All data will be erased.
+     */
     public void drop() {
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
             sequence.drop(txn);
@@ -66,6 +98,12 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
         }
     }
 
+    /**
+     * Append a rawdata-message to the end of this stream.
+     *
+     * @param message the message to append
+     * @throws InterruptedException if the calling thread is interrupted while waiting on internal resources
+     */
     public void write(LMDBRawdataMessage message) throws InterruptedException {
         /*
          * Use semaphore to avoid deadlock due to concurrent nested ByteBuffer acquire from pool.
@@ -119,12 +157,22 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
         }
     }
 
+    /**
+     * Get the first position in the stream as given by the sequence database.
+     *
+     * @return the first position in the stream, or null if the stream is empty.
+     */
     public String getFirstPosition() {
         try (Txn<ByteBuffer> txn = env.txnRead()) {
             return firstPositionInRange(txn, KeyRange.all());
         }
     }
 
+    /**
+     * Get the current last position in the stream as given by the sequence database.
+     *
+     * @return the current last position in the stream, or null if the stream is empty.
+     */
     public String getLastPosition() {
         try (Txn<ByteBuffer> txn = env.txnRead()) {
             return firstPositionInRange(txn, KeyRange.allBackward());
@@ -143,9 +191,19 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
         }
     }
 
+    /**
+     * Get a sequence of positions with at most 'n' elements start at the given initial-position. The sequence is
+     * decided by the 'sequence' database. If the
+     *
+     * @param initialPosition the initial-position to mark the beginning of the sequence
+     * @param inclusive       whether or not to include the initial-position in the returned sequence.
+     * @param n               a maximum limit of how many positions to include in the returned sequence. This value must
+     *                        be less than or equal to 10^6.
+     * @return the sequence of positions, or an empty sequence if the initial-position does not exists in the stream.
+     */
     public List<String> getSequence(String initialPosition, boolean inclusive, int n) {
         if (n > 1000000) {
-            throw new IllegalArgumentException("Not allowed: n > 1_000_000");
+            throw new IllegalArgumentException("Not allowed: n > 10^6");
         }
         try (Txn<ByteBuffer> txn = env.txnRead()) {
             return doGetSequence(txn, initialPosition, inclusive, n).stream().map(e -> e.position).collect(Collectors.toList());
@@ -179,6 +237,12 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
         }
     }
 
+    /**
+     * Get the message belonging to a given random position in the stream.
+     *
+     * @param position the position from which to get the message
+     * @return the message at the given position, or null if no such position exists in the stream.
+     */
     public LMDBRawdataMessage readContentOf(String position) {
         try (Txn<ByteBuffer> txn = env.txnRead()) {
             ByteBuffer dataKey = postionToULIDBytes(txn, position);
@@ -189,6 +253,16 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
         }
     }
 
+    /**
+     * Get a sequence of messages with at most 'n' elements start at the given initial-position. The message sequence is
+     * decided by the 'data' database which uses the same ordering as the 'sequence' database.
+     *
+     * @param initialPosition the initial-position to mark the beginning of the message sequence
+     * @param inclusive       whether or not to include the initial-position in the returned message sequence.
+     * @param n               a maximum limit of how many positions to include in the returned message sequece. This value must
+     *                        be less than or equal to 10^6.
+     * @return the message-sequence, or an empty sequence if the initial-position does not exists in the stream.
+     */
     public List<LMDBRawdataMessage> readContentBulk(String initialPosition, boolean inclusive, int n) {
         if (n > 1000000) {
             throw new IllegalArgumentException("Not allowed: n > 1_000_000");
