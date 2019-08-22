@@ -8,6 +8,8 @@ import org.lmdbjava.Env;
 import org.lmdbjava.EnvFlags;
 import org.lmdbjava.KeyRange;
 import org.lmdbjava.Txn;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -53,7 +55,9 @@ import java.util.stream.Collectors;
  * </ul>
  * <p>
  */
-public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
+class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
+
+    static final Logger log = LoggerFactory.getLogger(LMDBBackend.class);
 
     final ULID ulid = new ULID();
     final Env<ByteBuffer> env;
@@ -63,12 +67,17 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
 
     final AtomicReference<ULID.Value> previousIdRef = new AtomicReference<>(ulid.nextValue());
 
+    final Path path;
     final Semaphore writeSemaphore;
 
     final DirectByteBufferPool bufferPool;
     final DirectByteBufferPool ulidBytesOnlyPool;
 
-    public LMDBBackend(Path path, int writeConcurrency, int readConcurrency) {
+    final ReferenceCounter referenceCounter = new ReferenceCounter();
+
+    LMDBBackend(Path path, int writeConcurrency, int readConcurrency) {
+        log.trace("{} {} -- constructor", toString(), path.toString());
+        this.path = path;
         writeSemaphore = new Semaphore(writeConcurrency);
         bufferPool = new DirectByteBufferPool(2 * writeConcurrency, 1024);
         ulidBytesOnlyPool = new DirectByteBufferPool(2 * readConcurrency, 16);
@@ -90,6 +99,7 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
      * Drop all 3 databases. All data will be erased.
      */
     public void drop() {
+        log.trace("{} {} -- constructor", toString(), path.toString());
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
             sequence.drop(txn);
             index.drop(txn);
@@ -105,6 +115,7 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
      * @throws InterruptedException if the calling thread is interrupted while waiting on internal resources
      */
     public void write(LMDBRawdataMessage message) throws InterruptedException {
+        log.trace("{} {} -- write position: {}", toString(), path.toString(), message.position());
         /*
          * Use semaphore to avoid deadlock due to concurrent nested ByteBuffer acquire from pool.
          */
@@ -163,6 +174,7 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
      * @return the first position in the stream, or null if the stream is empty.
      */
     public String getFirstPosition() {
+        log.trace("{} {} -- getFirstPosition", toString(), path.toString());
         try (Txn<ByteBuffer> txn = env.txnRead()) {
             return firstPositionInRange(txn, KeyRange.all());
         }
@@ -174,6 +186,7 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
      * @return the current last position in the stream, or null if the stream is empty.
      */
     public String getLastPosition() {
+        log.trace("{} {} -- getFirstPosition", toString(), path.toString());
         try (Txn<ByteBuffer> txn = env.txnRead()) {
             return firstPositionInRange(txn, KeyRange.allBackward());
         }
@@ -202,6 +215,7 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
      * @return the sequence of positions, or an empty sequence if the initial-position does not exists in the stream.
      */
     public List<String> getSequence(String initialPosition, boolean inclusive, int n) {
+        log.trace("{} {} -- getSequence {}, {}, {}", toString(), path.toString(), initialPosition, inclusive, n);
         if (n > 1000000) {
             throw new IllegalArgumentException("Not allowed: n > 10^6");
         }
@@ -244,6 +258,7 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
      * @return the message at the given position, or null if no such position exists in the stream.
      */
     public LMDBRawdataMessage readContentOf(String position) {
+        log.trace("{} {} -- readContentOf {}", toString(), path.toString(), position);
         try (Txn<ByteBuffer> txn = env.txnRead()) {
             ByteBuffer dataKey = postionToULIDBytes(txn, position);
             if (dataKey == null) {
@@ -264,6 +279,7 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
      * @return the message-sequence, or an empty sequence if the initial-position does not exists in the stream.
      */
     public List<LMDBRawdataMessage> readContentBulk(String initialPosition, boolean inclusive, int n) {
+        log.trace("{} {} -- readContentBulk {}, {}, {}", toString(), path.toString(), initialPosition, inclusive, n);
         if (n > 1000000) {
             throw new IllegalArgumentException("Not allowed: n > 1_000_000");
         }
@@ -399,15 +415,29 @@ public class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseab
         return ULID.fromBytes(buf);
     }
 
+    /**
+     * Increment internal reference count used to know whether backend can be closed or not when close method is called.
+     *
+     * @return true if the refCount was incremented, otherwise false (the backend was already closed).
+     */
+    public boolean incrementRefCount() {
+        log.trace("{} {} -- incrementRefCount", toString(), path.toString());
+        return referenceCounter.incrementRefCount();
+    }
+
     @Override
     public void close() {
-        data.close();
-        sequence.close();
-        index.close();
-        env.close();
+        log.trace("{} {} -- close", toString(), path.toString());
+        if (referenceCounter.decrementRefCount()) {
+            data.close();
+            sequence.close();
+            index.close();
+            env.close();
+        }
     }
 
     public boolean isClosed() {
+        log.trace("{} {} -- isClosed", toString(), path.toString());
         return env.isClosed();
     }
 }

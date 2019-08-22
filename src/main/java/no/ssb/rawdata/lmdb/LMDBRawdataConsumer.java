@@ -14,7 +14,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Consumer;
 
 class LMDBRawdataConsumer implements RawdataConsumer {
 
@@ -27,13 +26,11 @@ class LMDBRawdataConsumer implements RawdataConsumer {
     final LMDBBackend lmdbBackend;
     final AtomicReference<String> positionRef;
     final AtomicBoolean closed = new AtomicBoolean(false);
-    final Consumer<LMDBRawdataConsumer> closeAction;
 
-    public LMDBRawdataConsumer(int consumerId, LMDBBackend lmdbBackend, String topic, String initialPosition, Consumer<LMDBRawdataConsumer> closeAction) {
+    public LMDBRawdataConsumer(int consumerId, LMDBBackend lmdbBackend, String topic, String initialPosition) {
         this.consumerId = consumerId;
         this.lmdbBackend = lmdbBackend;
         this.topic = topic;
-        this.closeAction = closeAction;
         this.positionRef = new AtomicReference<>(initialPosition);
     }
 
@@ -119,7 +116,7 @@ class LMDBRawdataConsumer implements RawdataConsumer {
     @Override
     public void close() {
         if (closed.compareAndSet(false, true)) {
-            closeAction.accept(this);
+            lmdbBackend.close();
         }
     }
 }

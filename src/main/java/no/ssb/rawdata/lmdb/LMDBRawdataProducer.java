@@ -11,7 +11,6 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Consumer;
 
 class LMDBRawdataProducer implements RawdataProducer {
 
@@ -20,13 +19,11 @@ class LMDBRawdataProducer implements RawdataProducer {
     final LMDBBackend lmdbBackend;
     final Map<String, LMDBRawdataMessage> buffer = new ConcurrentHashMap<>();
     final AtomicBoolean closed = new AtomicBoolean(false);
-    final Consumer<LMDBRawdataProducer> closeAction;
 
-    LMDBRawdataProducer(int producerId, LMDBBackend lmdbBackend, String topic, Consumer<LMDBRawdataProducer> closeAction) {
+    LMDBRawdataProducer(int producerId, LMDBBackend lmdbBackend, String topic) {
         this.producerId = producerId;
         this.lmdbBackend = lmdbBackend;
         this.topic = topic;
-        this.closeAction = closeAction;
     }
 
     @Override
@@ -145,7 +142,7 @@ class LMDBRawdataProducer implements RawdataProducer {
     @Override
     public void close() {
         if (closed.compareAndSet(false, true)) {
-            closeAction.accept(this);
+            lmdbBackend.close();
         }
     }
 }
