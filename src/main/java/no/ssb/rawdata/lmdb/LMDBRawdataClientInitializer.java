@@ -18,13 +18,21 @@ public class LMDBRawdataClientInitializer implements RawdataClientInitializer {
     @Override
     public Set<String> configurationKeys() {
         return Set.of(
-                "lmdb.folder"
+                "lmdb.folder",
+                "lmdb.map-size",
+                "lmdb.message.file.max-size",
+                "lmdb.topic.write-concurrency",
+                "lmdb.topic.read-concurrency"
         );
     }
 
     @Override
     public RawdataClient initialize(Map<String, String> configuration) {
         String folder = configuration.get("lmdb.folder");
-        return new LMDBRawdataClient(folder);
+        long lmdbMapSize = Long.parseLong(configuration.get("lmdb.map-size"));
+        int maxMessageContentFileSize = Integer.parseInt(configuration.get("lmdb.message.file.max-size"));
+        int writeConcurrencyPerTopic = Integer.parseInt(configuration.get("lmdb.topic.write-concurrency"));
+        int readConcurrencyPerTopic = Integer.parseInt(configuration.get("lmdb.topic.read-concurrency"));
+        return new LMDBRawdataClient(folder, lmdbMapSize, maxMessageContentFileSize, writeConcurrencyPerTopic, readConcurrencyPerTopic);
     }
 }

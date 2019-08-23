@@ -8,6 +8,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
@@ -18,7 +22,7 @@ public class LMDBBackendTest {
 
     @BeforeMethod
     public void setup() {
-        lmdbBackend = new LMDBBackend(Paths.get("target/lmdbwritertest"), 1, 1);
+        lmdbBackend = new LMDBBackend(Paths.get("target/lmdbwritertest"), 1024 * 1024 * 1024, 1, 1, 512 * 1024);
         lmdbBackend.drop();
     }
 
@@ -33,7 +37,7 @@ public class LMDBBackendTest {
         lmdbBackend.write(new LMDBRawdataMessage("a", Map.of("payload", "hello".getBytes(StandardCharsets.UTF_8))));
         lmdbBackend.close();
         lmdbBackend = null;
-        lmdbBackend = new LMDBBackend(Paths.get("target/lmdbwritertest"), 1, 1);
+        lmdbBackend = new LMDBBackend(Paths.get("target/lmdbwritertest"), 1024 * 1024 * 1024, 1, 1, 512 * 1024);
         LMDBRawdataMessage message = lmdbBackend.readContentOf("a");
         assertEquals(message.data.size(), 1);
         assertTrue(message.data.containsKey("payload"));
@@ -129,5 +133,101 @@ public class LMDBBackendTest {
         assertEquals(lmdbBackend.readContentBulk("b", false, 6), List.of(expectedA, expectedF, expectedC, expectedD, expectedX, expectedS));
         assertEquals(lmdbBackend.readContentBulk("f", true, 2), List.of(expectedF, expectedC));
         assertEquals(lmdbBackend.readContentBulk("f", false, 3), List.of(expectedC, expectedD, expectedX));
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class)
+    public void thatWritingAnExstingPositionIsIllegal() {
+        writeDummy("my-position");
+        writeDummy("my-position");
+    }
+
+    @Test
+    public void thatLotsOfReadAndWriteConcurrencyCompletes() throws InterruptedException {
+        lmdbBackend.close();
+        lmdbBackend = null;
+        lmdbBackend = new LMDBBackend(Paths.get("target/lmdb/concurrency-test"), 64 * 1024 * 1024, 20, 80, 64);
+        lmdbBackend.drop();
+        CountDownLatch latch = new CountDownLatch(100);
+        final AtomicInteger nextReaderId = new AtomicInteger(0);
+        Runnable readOperation = () -> {
+            int readerId = nextReaderId.incrementAndGet();
+            try {
+                Random random = new Random();
+                for (int i = 0; i < 10; i++) {
+                    nap(random, 100);
+                    String firstPosition = lmdbBackend.getFirstPosition();
+                    if (firstPosition != null) {
+                        nap(random, 20);
+                        lmdbBackend.readContentOf(firstPosition);
+                    }
+                    nap(random, 100);
+                    String lastPosition = lmdbBackend.getLastPosition();
+                    if (lastPosition != null) {
+                        nap(random, 20);
+                        lmdbBackend.readContentOf(lastPosition);
+                    }
+                    nap(random, 100);
+                    String firstPositionForGetSequence = lmdbBackend.getFirstPosition();
+                    if (firstPositionForGetSequence != null) {
+                        List<String> sequence = lmdbBackend.getSequence(firstPositionForGetSequence, true, 1000);
+                        //System.out.printf("Reader %d got sequence: %s%n", readerId, sequence);
+                    }
+                    nap(random, 100);
+                    String firstPositionForReadBulk = lmdbBackend.getFirstPosition();
+                    if (firstPositionForReadBulk != null) {
+                        lmdbBackend.readContentBulk(firstPositionForReadBulk, true, 1000);
+                    }
+                }
+            } catch (Throwable t) {
+                t.printStackTrace();
+            } finally {
+                latch.countDown();
+            }
+        };
+        final AtomicInteger nextWriterId = new AtomicInteger(0);
+        Runnable writeOperation = () -> {
+            int writerId = nextWriterId.incrementAndGet();
+            try {
+                Random random = new Random();
+                writeDummy(writerId + "-start");
+                for (int i = 0; i < 10; i++) {
+                    nap(random, 10);
+                    writeDummy(writerId + "-" + i);
+                }
+                nap(random, 10);
+                writeDummy(writerId + "-end");
+            } catch (Throwable t) {
+                t.printStackTrace();
+            } finally {
+                latch.countDown();
+            }
+        };
+        for (int i = 0; i < 80; i++) {
+            new Thread(readOperation).start();
+        }
+        for (int i = 0; i < 20; i++) {
+            new Thread(writeOperation).start();
+        }
+        assertTrue(latch.await(30, TimeUnit.SECONDS));
+        List<String> sequence = lmdbBackend.getSequence(lmdbBackend.getFirstPosition(), true, 100000);
+        assertEquals(sequence.size(), 20 * 12);
+    }
+
+    private void writeDummy(String position) {
+        lmdbBackend.write(new LMDBRawdataMessage(position, Map.of(
+                "three", new byte[3],
+                "four", new byte[4],
+                "five", new byte[5],
+                "six", new byte[6],
+                "seven", new byte[7]
+        )));
+    }
+
+    private void nap(Random random, int maxMillis) {
+        try {
+            Thread.sleep(random.nextInt(maxMillis));
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
     }
 }

@@ -5,7 +5,6 @@ import org.lmdbjava.CursorIterator;
 import org.lmdbjava.Dbi;
 import org.lmdbjava.DbiFlags;
 import org.lmdbjava.Env;
-import org.lmdbjava.EnvFlags;
 import org.lmdbjava.KeyRange;
 import org.lmdbjava.Txn;
 import org.slf4j.Logger;
@@ -22,7 +21,6 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -68,19 +66,27 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
     final AtomicReference<ULID.Value> previousIdRef = new AtomicReference<>(ulid.nextValue());
 
     final Path path;
-    final Semaphore writeSemaphore;
-
-    final DirectByteBufferPool bufferPool;
-    final DirectByteBufferPool ulidBytesOnlyPool;
+    final DirectByteBufferPool contentDataBufferPool;
+    final DirectByteBufferPool keyBufferPool;
 
     final ReferenceCounter referenceCounter = new ReferenceCounter();
 
-    LMDBBackend(Path path, int writeConcurrency, int readConcurrency) {
+    /**
+     * @param path                      the folder where this LMDB backend should access the database and lock files.
+     * @param mapSize                   the size of the memory-mapped database (in bytes). The database file will be
+     *                                  allocated to this size.
+     * @param writeConcurrency          maximum number of concurrent writers, used to allocate enough direct
+     *                                  byte-buffers in pools to avoid deadlock.
+     * @param readConcurrency           maximum number of concurrent readers, used to allocate enough direct
+     *                                  byte-buffers in pools to avoid deadlock.
+     * @param maxMessageFileContentSize max-size (in bytes) of a single content element in any message written to the
+     *                                  database using this instance.
+     */
+    LMDBBackend(Path path, long mapSize, int writeConcurrency, int readConcurrency, int maxMessageFileContentSize) {
         log.trace("{} {} -- constructor", toString(), path.toString());
         this.path = path;
-        writeSemaphore = new Semaphore(writeConcurrency);
-        bufferPool = new DirectByteBufferPool(2 * writeConcurrency, 1024);
-        ulidBytesOnlyPool = new DirectByteBufferPool(2 * readConcurrency, 16);
+        contentDataBufferPool = new DirectByteBufferPool(writeConcurrency, maxMessageFileContentSize);
+        keyBufferPool = new DirectByteBufferPool((2 * writeConcurrency) + readConcurrency, 256);
         try {
             Files.createDirectories(path);
         } catch (IOException e) {
@@ -88,8 +94,8 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
         }
         env = Env.create()
                 .setMaxDbs(3)
-                .setMapSize(1 * 1024 * 1024)
-                .open(path.toFile(), EnvFlags.MDB_WRITEMAP);
+                .setMapSize(mapSize)
+                .open(path.toFile());
         data = env.openDbi("data", DbiFlags.MDB_CREATE);
         sequence = env.openDbi("sequence", DbiFlags.MDB_CREATE);
         index = env.openDbi("index", DbiFlags.MDB_CREATE);
@@ -112,59 +118,53 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
      * Append a rawdata-message to the end of this stream.
      *
      * @param message the message to append
-     * @throws InterruptedException if the calling thread is interrupted while waiting on internal resources
      */
-    public void write(LMDBRawdataMessage message) throws InterruptedException {
-        log.trace("{} {} -- write position: {}", toString(), path.toString(), message.position());
-        /*
-         * Use semaphore to avoid deadlock due to concurrent nested ByteBuffer acquire from pool.
-         */
-        writeSemaphore.acquire();
+    public void write(LMDBRawdataMessage message) {
+        ULID.Value id = null;
+        do {
+            ULID.Value previousUlid = previousIdRef.get();
+            ULID.Value attemptedId = ulid.nextStrictlyMonotonicValue(previousUlid).orElseThrow();
+            if (previousIdRef.compareAndSet(previousUlid, attemptedId)) {
+                id = attemptedId;
+            }
+        } while (id == null);
+        log.trace("{} {} -- write position: {}, ULID: {}", toString(), path.toString(), message.position(), id.toString());
+        ByteBuffer keyBuffer = keyBufferPool.acquire();
         try {
-            ULID.Value id = null;
-            do {
-                ULID.Value previousUlid = previousIdRef.get();
-                ULID.Value attemptedId = ulid.nextStrictlyMonotonicValue(previousUlid).orElseThrow();
-                if (previousIdRef.compareAndSet(previousUlid, attemptedId)) {
-                    id = attemptedId;
+            keyBuffer.put(id.toBytes());
+            int mark = keyBuffer.position();
+            try (Txn<ByteBuffer> txn = env.txnWrite()) {
+                if (postionToULIDBytes(txn, message.position()) != null) {
+                    throw new IllegalArgumentException("Illegal write, position already exists in database: " + message.position());
                 }
-            } while (id == null);
-            ByteBuffer keyBuffer = bufferPool.acquire();
-            try {
-                keyBuffer.put(id.toBytes());
-                int mark = keyBuffer.position();
-                try (Txn<ByteBuffer> txn = env.txnWrite()) {
-                    ByteBuffer messageDataBuffer = bufferPool.acquire();
-                    try {
-                        for (Map.Entry<String, byte[]> entry : message.getData().entrySet()) {
-                            keyBuffer.put(entry.getKey().getBytes(StandardCharsets.UTF_8));
-                            messageDataBuffer.clear();
-                            messageDataBuffer.put(entry.getValue());
-                            data.put(txn, keyBuffer.flip(), messageDataBuffer.flip());
-                            keyBuffer.clear();
-                            keyBuffer.position(mark);
-                        }
-                    } finally {
-                        bufferPool.release(messageDataBuffer);
+                ByteBuffer messageDataBuffer = contentDataBufferPool.acquire();
+                try {
+                    for (Map.Entry<String, byte[]> entry : message.getData().entrySet()) {
+                        keyBuffer.put(entry.getKey().getBytes(StandardCharsets.UTF_8));
+                        messageDataBuffer.clear();
+                        messageDataBuffer.put(entry.getValue());
+                        data.put(txn, keyBuffer.flip(), messageDataBuffer.flip());
+                        keyBuffer.clear();
+                        keyBuffer.position(mark);
                     }
-                    keyBuffer.limit(keyBuffer.position());
-                    keyBuffer.flip();
-                    ByteBuffer positionBuffer = bufferPool.acquire();
-                    try {
-                        positionBuffer.put(message.position().getBytes(StandardCharsets.UTF_8));
-                        positionBuffer.flip();
-                        sequence.put(txn, keyBuffer, positionBuffer);
-                        index.put(txn, positionBuffer, keyBuffer);
-                    } finally {
-                        bufferPool.release(positionBuffer);
-                    }
-                    txn.commit();
+                } finally {
+                    contentDataBufferPool.release(messageDataBuffer);
                 }
-            } finally {
-                bufferPool.release(keyBuffer);
+                keyBuffer.limit(keyBuffer.position());
+                keyBuffer.flip();
+                ByteBuffer positionBuffer = keyBufferPool.acquire();
+                try {
+                    positionBuffer.put(message.position().getBytes(StandardCharsets.UTF_8));
+                    positionBuffer.flip();
+                    sequence.put(txn, keyBuffer, positionBuffer);
+                    index.put(txn, positionBuffer, keyBuffer);
+                } finally {
+                    keyBufferPool.release(positionBuffer);
+                }
+                txn.commit();
             }
         } finally {
-            writeSemaphore.release();
+            keyBufferPool.release(keyBuffer);
         }
     }
 
@@ -269,6 +269,32 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
     }
 
     /**
+     * Get message belonging to the given ULID.
+     *
+     * @param txn
+     * @param ulidBytes a byte representation of the key prefix in the stream
+     * @return
+     */
+    private LMDBRawdataMessage getDataContent(Txn<ByteBuffer> txn, String position, ByteBuffer ulidBytes) {
+        ULID.Value ulid = bytesToULID(ulidBytes);
+        ULID.Value upperBoundValue = this.ulid.nextStrictlyMonotonicValue(ulid, ulid.timestamp()).orElseThrow();
+        ulidBytes.flip();
+        byte[] upperBoundByteBuffer = upperBoundValue.toBytes();
+        ByteBuffer upperBound = keyBufferPool.acquire();
+        try {
+            upperBound.put(upperBoundByteBuffer);
+            KeyRange<ByteBuffer> range = KeyRange.closedOpen(ulidBytes, upperBound.flip());
+            List<LMDBRawdataMessage> messages = readContentInRange(txn, Map.of(ulid, position), range, 1);
+            if (messages.isEmpty()) {
+                return null;
+            }
+            return messages.get(0);
+        } finally {
+            keyBufferPool.release(upperBound);
+        }
+    }
+
+    /**
      * Get a sequence of messages with at most 'n' elements start at the given initial-position. The message sequence is
      * decided by the 'data' database which uses the same ordering as the 'sequence' database.
      *
@@ -298,44 +324,19 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
             }
             positionByUlid = ulidAndPositionSequence.stream().collect(Collectors.toMap(e -> e.key, e -> e.position));
             KeyRange<ByteBuffer> range;
-            ByteBuffer startKeyBytes = ulidBytesOnlyPool.acquire();
+            ByteBuffer startKeyBytes = keyBufferPool.acquire();
             try {
                 startKeyBytes.put(ulidAndPositionSequence.get(0).key.toBytes()).flip();
                 range = KeyRange.atLeast(startKeyBytes);
                 return readContentInRange(txn, positionByUlid, range, n);
             } finally {
-                ulidBytesOnlyPool.release(startKeyBytes);
+                keyBufferPool.release(startKeyBytes);
             }
         }
     }
 
-    /**
-     * Get message belonging to the given ULID.
-     *
-     * @param txn
-     * @param ulidBytes a byte representation of the key prefix in the stream
-     * @return
-     */
-    private LMDBRawdataMessage getDataContent(Txn<ByteBuffer> txn, String position, ByteBuffer ulidBytes) {
-        ULID.Value ulid = bytesToULID(ulidBytes);
-        ULID.Value upperBoundValue = this.ulid.nextStrictlyMonotonicValue(ulid, ulid.timestamp()).orElseThrow();
-        ulidBytes.flip();
-        byte[] upperBoundByteBuffer = upperBoundValue.toBytes();
-        ByteBuffer upperBound = ulidBytesOnlyPool.acquire();
-        try {
-            upperBound.put(upperBoundByteBuffer);
-            KeyRange<ByteBuffer> range = KeyRange.closedOpen(ulidBytes, upperBound.flip());
-            List<LMDBRawdataMessage> messages = readContentInRange(txn, Map.of(ulid, position), range, 1);
-            if (messages.isEmpty()) {
-                return null;
-            }
-            return messages.get(0);
-        } finally {
-            ulidBytesOnlyPool.release(upperBound);
-        }
-    }
-
-    private List<LMDBRawdataMessage> readContentInRange(Txn<ByteBuffer> txn, Map<ULID.Value, String> positionByUlid, KeyRange<ByteBuffer> range, int n) {
+    private List<LMDBRawdataMessage> readContentInRange
+            (Txn<ByteBuffer> txn, Map<ULID.Value, String> positionByUlid, KeyRange<ByteBuffer> range, int n) {
         try (CursorIterator<ByteBuffer> iterator = data.iterate(txn, range)) {
             List<LMDBRawdataMessage> result = new ArrayList<>(n);
             Map<String, byte[]> messageData = null;
@@ -399,13 +400,13 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
      * @return
      */
     private ByteBuffer postionToULIDBytes(Txn<ByteBuffer> txn, String position) {
-        ByteBuffer buffer = bufferPool.acquire();
+        ByteBuffer buffer = keyBufferPool.acquire();
         try {
             buffer.put(position.getBytes(StandardCharsets.UTF_8));
             ByteBuffer ulidBytes = index.get(txn, buffer.flip());
             return ulidBytes;
         } finally {
-            bufferPool.release(buffer);
+            keyBufferPool.release(buffer);
         }
     }
 

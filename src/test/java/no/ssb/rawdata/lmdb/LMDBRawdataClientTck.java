@@ -32,7 +32,13 @@ public class LMDBRawdataClientTck {
 
     @BeforeMethod
     public void createRawdataClient() throws IOException {
-        Map<String, String> configuration = Map.of("lmdb.folder", "target/lmdb");
+        Map<String, String> configuration = Map.of(
+                "lmdb.folder", "target/lmdb",
+                "lmdb.map-size", Long.toString(1024 * 1024 * 1024),
+                "lmdb.message.file.max-size", Integer.toString(512 * 1024),
+                "lmdb.topic.write-concurrency", "1",
+                "lmdb.topic.read-concurrency", "3"
+        );
         Path lmdbFolder = Paths.get(configuration.get("lmdb.folder"));
         if (Files.exists(lmdbFolder)) {
             Files.walk(lmdbFolder).sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(File::delete);

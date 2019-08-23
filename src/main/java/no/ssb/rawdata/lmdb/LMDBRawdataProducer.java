@@ -96,11 +96,7 @@ class LMDBRawdataProducer implements RawdataProducer {
         }
         for (String position : positions) {
             LMDBRawdataMessage payload = buffer.remove(position);
-            try {
-                lmdbBackend.write(payload);
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
-            }
+            lmdbBackend.write(payload);
         }
     }
 

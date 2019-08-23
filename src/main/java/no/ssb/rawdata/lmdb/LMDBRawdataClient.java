@@ -16,16 +16,25 @@ import static java.util.Optional.ofNullable;
 
 class LMDBRawdataClient implements RawdataClient {
 
-    final AtomicInteger producerAndConsumerIdGenerator = new AtomicInteger();
     final Path folder;
+    final long lmdbMapSize;
+    final int maxMessageContentFileSize;
+    final int writeConcurrencyPerTopic;
+    final int readConcurrencyPerTopic;
+
+    final AtomicInteger producerAndConsumerIdGenerator = new AtomicInteger();
     final AtomicBoolean closed = new AtomicBoolean(false);
 
     final Map<String, LMDBBackend> backendByTopic = new LinkedHashMap<>();
     final List<LMDBRawdataProducer> producers = new CopyOnWriteArrayList<>();
     final List<LMDBRawdataConsumer> consumers = new CopyOnWriteArrayList<>();
 
-    LMDBRawdataClient(String folder) {
+    LMDBRawdataClient(String folder, long lmdbMapSize, int maxMessageContentFileSize, int writeConcurrencyPerTopic, int readConcurrencyPerTopic) {
         this.folder = Paths.get(folder);
+        this.lmdbMapSize = lmdbMapSize;
+        this.maxMessageContentFileSize = maxMessageContentFileSize;
+        this.writeConcurrencyPerTopic = writeConcurrencyPerTopic;
+        this.readConcurrencyPerTopic = readConcurrencyPerTopic;
     }
 
     @Override
@@ -53,8 +62,8 @@ class LMDBRawdataClient implements RawdataClient {
         })).orElseGet(() -> backendByTopic.computeIfAbsent(topic, t -> createLMDBBackendAndIncrementRefCount(t)));
     }
 
-    private LMDBBackend createLMDBBackendAndIncrementRefCount(String t) {
-        LMDBBackend newLmdbBackend = new LMDBBackend(folder.resolve(t), 1, 10);
+    private LMDBBackend createLMDBBackendAndIncrementRefCount(String topic) {
+        LMDBBackend newLmdbBackend = new LMDBBackend(folder.resolve(topic), lmdbMapSize, writeConcurrencyPerTopic, readConcurrencyPerTopic, maxMessageContentFileSize);
         newLmdbBackend.incrementRefCount();
         return newLmdbBackend;
     }
