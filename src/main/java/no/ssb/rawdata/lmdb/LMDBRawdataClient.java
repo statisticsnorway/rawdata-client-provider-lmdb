@@ -1,6 +1,7 @@
 package no.ssb.rawdata.lmdb;
 
 import no.ssb.rawdata.api.RawdataClient;
+import no.ssb.rawdata.api.RawdataClosedException;
 import no.ssb.rawdata.api.RawdataConsumer;
 
 import java.nio.file.Path;
@@ -63,9 +64,21 @@ class LMDBRawdataClient implements RawdataClient {
     }
 
     private LMDBBackend createLMDBBackendAndIncrementRefCount(String topic) {
-        LMDBBackend newLmdbBackend = new LMDBBackend(folder.resolve(topic), lmdbMapSize, writeConcurrencyPerTopic, readConcurrencyPerTopic, maxMessageContentFileSize);
+        LMDBBackend newLmdbBackend = createNewLmdbBackend(topic);
         newLmdbBackend.incrementRefCount();
         return newLmdbBackend;
+    }
+
+    private LMDBBackend createNewLmdbBackend(String topic) {
+        return new LMDBBackend(folder.resolve(topic), lmdbMapSize, writeConcurrencyPerTopic, readConcurrencyPerTopic, maxMessageContentFileSize);
+    }
+
+    @Override
+    public String lastPosition(String topic) throws RawdataClosedException {
+        if (isClosed()) {
+            throw new RawdataClosedException(String.format("producer for is closed, topic: %s", topic));
+        }
+        return backendByTopic.computeIfAbsent(topic, t -> createNewLmdbBackend(t)).getLastPosition();
     }
 
     @Override

@@ -1,8 +1,8 @@
 package no.ssb.rawdata.lmdb;
 
 import no.ssb.rawdata.api.RawdataClosedException;
-import no.ssb.rawdata.api.RawdataContentNotBufferedException;
 import no.ssb.rawdata.api.RawdataMessage;
+import no.ssb.rawdata.api.RawdataNotBufferedException;
 import no.ssb.rawdata.api.RawdataProducer;
 
 import java.util.LinkedHashMap;
@@ -29,14 +29,6 @@ class LMDBRawdataProducer implements RawdataProducer {
     @Override
     public String topic() {
         return topic;
-    }
-
-    @Override
-    public String lastPosition() throws RawdataClosedException {
-        if (isClosed()) {
-            throw new RawdataClosedException(String.format("producer for is closed, topic: %s", topic));
-        }
-        return lmdbBackend.getLastPosition();
     }
 
     @Override
@@ -85,13 +77,13 @@ class LMDBRawdataProducer implements RawdataProducer {
     }
 
     @Override
-    public void publish(String... positions) throws RawdataClosedException, RawdataContentNotBufferedException {
+    public void publish(String... positions) throws RawdataClosedException, RawdataNotBufferedException {
         if (isClosed()) {
             throw new RawdataClosedException(String.format("producer for is closed, topic: %s", topic));
         }
         for (String position : positions) {
             if (!buffer.containsKey(position)) {
-                throw new RawdataContentNotBufferedException(String.format("position %s is not in buffer", position));
+                throw new RawdataNotBufferedException(String.format("position %s is not in buffer", position));
             }
         }
         for (String position : positions) {
