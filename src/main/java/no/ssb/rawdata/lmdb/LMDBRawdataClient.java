@@ -1,8 +1,10 @@
 package no.ssb.rawdata.lmdb;
 
+import de.huxhorn.sulky.ulid.ULID;
 import no.ssb.rawdata.api.RawdataClient;
 import no.ssb.rawdata.api.RawdataClosedException;
 import no.ssb.rawdata.api.RawdataConsumer;
+import no.ssb.rawdata.api.RawdataMessage;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -47,11 +49,38 @@ class LMDBRawdataClient implements RawdataClient {
     }
 
     @Override
-    public RawdataConsumer consumer(String topic, String initialPosition) {
+    public RawdataConsumer consumer(String topic, ULID.Value initialPosition, boolean inclusive) {
         LMDBBackend lmdbBackend = openLmdbBackendAndIncreaseReferenceCount(topic);
-        LMDBRawdataConsumer consumer = new LMDBRawdataConsumer(producerAndConsumerIdGenerator.incrementAndGet(), lmdbBackend, topic, initialPosition);
+        LMDBCursor initialCursor = initialPosition == null ? null : new LMDBCursor(initialPosition, inclusive, true);
+        LMDBRawdataConsumer consumer = new LMDBRawdataConsumer(producerAndConsumerIdGenerator.incrementAndGet(), lmdbBackend, topic, initialCursor);
         consumers.add(consumer);
         return consumer;
+    }
+
+    @Override
+    public ULID.Value ulidOfPosition(String topic, String position) {
+        if (isClosed()) {
+            throw new RawdataClosedException(String.format("producer for is closed, topic: %s", topic));
+        }
+        LMDBBackend lmdbBackend = openLmdbBackendAndIncreaseReferenceCount(topic);
+        try {
+            return lmdbBackend.ulidOf(position);
+        } finally {
+            lmdbBackend.close();
+        }
+    }
+
+    @Override
+    public RawdataMessage lastMessage(String topic) throws RawdataClosedException {
+        if (isClosed()) {
+            throw new RawdataClosedException(String.format("producer for is closed, topic: %s", topic));
+        }
+        LMDBBackend lmdbBackend = openLmdbBackendAndIncreaseReferenceCount(topic);
+        try {
+            return lmdbBackend.getLastMessage();
+        } finally {
+            lmdbBackend.close();
+        }
     }
 
     private LMDBBackend openLmdbBackendAndIncreaseReferenceCount(String topic) {
@@ -71,14 +100,6 @@ class LMDBRawdataClient implements RawdataClient {
 
     private LMDBBackend createNewLmdbBackend(String topic) {
         return new LMDBBackend(folder.resolve(topic), lmdbMapSize, writeConcurrencyPerTopic, readConcurrencyPerTopic, maxMessageContentFileSize);
-    }
-
-    @Override
-    public String lastPosition(String topic) throws RawdataClosedException {
-        if (isClosed()) {
-            throw new RawdataClosedException(String.format("producer for is closed, topic: %s", topic));
-        }
-        return backendByTopic.computeIfAbsent(topic, t -> createNewLmdbBackend(t)).getLastPosition();
     }
 
     @Override

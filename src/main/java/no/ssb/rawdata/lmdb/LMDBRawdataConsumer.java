@@ -24,14 +24,18 @@ class LMDBRawdataConsumer implements RawdataConsumer {
     final Condition condition = lock.newCondition();
     final String topic;
     final LMDBBackend lmdbBackend;
-    final AtomicReference<String> positionRef;
+    final AtomicReference<LMDBCursor> cursorRef = new AtomicReference<>();
     final AtomicBoolean closed = new AtomicBoolean(false);
 
-    public LMDBRawdataConsumer(int consumerId, LMDBBackend lmdbBackend, String topic, String initialPosition) {
+    LMDBRawdataConsumer(int consumerId, LMDBBackend lmdbBackend, String topic, LMDBCursor initialPosition) {
         this.consumerId = consumerId;
         this.lmdbBackend = lmdbBackend;
         this.topic = topic;
-        this.positionRef = new AtomicReference<>(initialPosition);
+        if (initialPosition != null) {
+            cursorRef.set(initialPosition);
+        } else {
+            cursorRef.set(new LMDBCursor(RawdataConsumer.beginningOfTime(), true, true));
+        }
     }
 
     @Override
@@ -49,15 +53,17 @@ class LMDBRawdataConsumer implements RawdataConsumer {
             int pollIntervalNanos = 250 * 1000 * 1000;
             long expireTimeNano = System.nanoTime() + unit.toNanos(timeout);
             while (true) {
-                String initialPosition = positionRef.get();
-                List<LMDBRawdataMessage> contents = lmdbBackend.readContentBulk(initialPosition, false, 1);
+                LMDBCursor cursor = cursorRef.get();
+                List<LMDBRawdataMessage> contents = lmdbBackend.readContentBulk(cursor, 1);
                 if (contents.size() == 1) {
-                    positionRef.compareAndSet(initialPosition, contents.get(0).position());
+                    LMDBRawdataMessage msg = contents.get(0);
+                    cursorRef.compareAndSet(cursor, new LMDBCursor(msg.ulid(), false, true));
                     return contents.get(0);
                 }
                 if (contents.size() > 1) {
                     log.error("BUG: Got size > 1 from readContentBulk, using the first element as fallback");
-                    positionRef.compareAndSet(initialPosition, contents.get(0).position());
+                    LMDBRawdataMessage msg = contents.get(0);
+                    cursorRef.compareAndSet(cursor, new LMDBCursor(msg.ulid(), false, true));
                     return contents.get(0);
                 }
                 // end of stream, wait until expire time for another message to appear
@@ -88,7 +94,7 @@ class LMDBRawdataConsumer implements RawdataConsumer {
 
     @Override
     public void seek(long timestamp) {
-        throw new UnsupportedOperationException();
+        cursorRef.set(new LMDBCursor(RawdataConsumer.beginningOfTime(timestamp), true, true));
     }
 
     @Override

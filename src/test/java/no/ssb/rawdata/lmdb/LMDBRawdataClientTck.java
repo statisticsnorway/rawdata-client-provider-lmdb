@@ -53,7 +53,7 @@ public class LMDBRawdataClientTck {
 
     @Test
     public void thatLastPositionOfEmptyTopicCanBeRead() {
-        assertEquals(client.lastPosition("the-topic"), null);
+        assertNull(client.lastMessage("the-topic"));
     }
 
     @Test
@@ -64,12 +64,12 @@ public class LMDBRawdataClientTck {
         producer.buffer(producer.builder().position("b").put("payload", new byte[3]));
         producer.publish("a", "b");
 
-        assertEquals(client.lastPosition("the-topic"), "b");
+        assertEquals(client.lastMessage("the-topic").position(), "b");
 
         producer.buffer(producer.builder().position("c").put("payload", new byte[7]));
         producer.publish("c");
 
-        assertEquals(client.lastPosition("the-topic"), "c");
+        assertEquals(client.lastMessage("the-topic").position(), "c");
     }
 
     @Test(expectedExceptions = RawdataNotBufferedException.class)
@@ -83,11 +83,11 @@ public class LMDBRawdataClientTck {
         RawdataProducer producer = client.producer("the-topic");
         RawdataConsumer consumer = client.consumer("the-topic");
 
-        RawdataMessage expected1 = producer.buffer(producer.builder().position("a").put("payload", new byte[5]));
-        producer.publish(expected1.position());
+        producer.buffer(producer.builder().position("a").put("payload", new byte[5]));
+        producer.publish("a");
 
         RawdataMessage message = consumer.receive(1, TimeUnit.SECONDS);
-        assertEquals(message, expected1);
+        assertEquals(message.position(), "a");
     }
 
     @Test
@@ -97,11 +97,11 @@ public class LMDBRawdataClientTck {
 
         CompletableFuture<? extends RawdataMessage> future = consumer.receiveAsync();
 
-        RawdataMessage expected1 = producer.buffer(producer.builder().position("a").put("payload", new byte[5]));
-        producer.publish(expected1.position());
+        producer.buffer(producer.builder().position("a").put("payload", new byte[5]));
+        producer.publish("a");
 
         RawdataMessage message = future.join();
-        assertEquals(message, expected1);
+        assertEquals(message.position(), "a");
     }
 
     @Test
@@ -109,17 +109,17 @@ public class LMDBRawdataClientTck {
         RawdataProducer producer = client.producer("the-topic");
         RawdataConsumer consumer = client.consumer("the-topic");
 
-        RawdataMessage expected1 = producer.buffer(producer.builder().position("a").put("payload", new byte[5]));
-        RawdataMessage expected2 = producer.buffer(producer.builder().position("b").put("payload", new byte[3]));
-        RawdataMessage expected3 = producer.buffer(producer.builder().position("c").put("payload", new byte[7]));
-        producer.publish(expected1.position(), expected2.position(), expected3.position());
+        producer.buffer(producer.builder().position("a").put("payload", new byte[5]));
+        producer.buffer(producer.builder().position("b").put("payload", new byte[3]));
+        producer.buffer(producer.builder().position("c").put("payload", new byte[7]));
+        producer.publish("a", "b", "c");
 
         RawdataMessage message1 = consumer.receive(1, TimeUnit.SECONDS);
         RawdataMessage message2 = consumer.receive(1, TimeUnit.SECONDS);
         RawdataMessage message3 = consumer.receive(1, TimeUnit.SECONDS);
-        assertEquals(message1, expected1);
-        assertEquals(message2, expected2);
-        assertEquals(message3, expected3);
+        assertEquals(message1.position(), "a");
+        assertEquals(message2.position(), "b");
+        assertEquals(message3.position(), "c");
     }
 
     @Test
@@ -129,16 +129,16 @@ public class LMDBRawdataClientTck {
 
         CompletableFuture<List<RawdataMessage>> future = receiveAsyncAddMessageAndRepeatRecursive(consumer, "c", new ArrayList<>());
 
-        RawdataMessage expected1 = producer.buffer(producer.builder().position("a").put("payload", new byte[5]));
-        RawdataMessage expected2 = producer.buffer(producer.builder().position("b").put("payload", new byte[3]));
-        RawdataMessage expected3 = producer.buffer(producer.builder().position("c").put("payload", new byte[7]));
-        producer.publish(expected1.position(), expected2.position(), expected3.position());
+        producer.buffer(producer.builder().position("a").put("payload", new byte[5]));
+        producer.buffer(producer.builder().position("b").put("payload", new byte[3]));
+        producer.buffer(producer.builder().position("c").put("payload", new byte[7]));
+        producer.publish("a", "b", "c");
 
         List<RawdataMessage> messages = future.join();
 
-        assertEquals(messages.get(0), expected1);
-        assertEquals(messages.get(1), expected2);
-        assertEquals(messages.get(2), expected3);
+        assertEquals(messages.get(0).position(), "a");
+        assertEquals(messages.get(1).position(), "b");
+        assertEquals(messages.get(2).position(), "c");
     }
 
     private CompletableFuture<List<RawdataMessage>> receiveAsyncAddMessageAndRepeatRecursive(RawdataConsumer consumer, String endPosition, List<RawdataMessage> messages) {
@@ -160,20 +160,20 @@ public class LMDBRawdataClientTck {
         CompletableFuture<List<RawdataMessage>> future1 = receiveAsyncAddMessageAndRepeatRecursive(consumer1, "c", new ArrayList<>());
         CompletableFuture<List<RawdataMessage>> future2 = receiveAsyncAddMessageAndRepeatRecursive(consumer2, "c", new ArrayList<>());
 
-        RawdataMessage expected1 = producer.buffer(producer.builder().position("a").put("payload", new byte[5]));
-        RawdataMessage expected2 = producer.buffer(producer.builder().position("b").put("payload", new byte[3]));
-        RawdataMessage expected3 = producer.buffer(producer.builder().position("c").put("payload", new byte[7]));
-        producer.publish(expected1.position(), expected2.position(), expected3.position());
+        producer.buffer(producer.builder().position("a").put("payload", new byte[5]));
+        producer.buffer(producer.builder().position("b").put("payload", new byte[3]));
+        producer.buffer(producer.builder().position("c").put("payload", new byte[7]));
+        producer.publish("a", "b", "c");
 
         List<RawdataMessage> messages1 = future1.join();
-        assertEquals(messages1.get(0), expected1);
-        assertEquals(messages1.get(1), expected2);
-        assertEquals(messages1.get(2), expected3);
+        assertEquals(messages1.get(0).position(), "a");
+        assertEquals(messages1.get(1).position(), "b");
+        assertEquals(messages1.get(2).position(), "c");
 
         List<RawdataMessage> messages2 = future2.join();
-        assertEquals(messages2.get(0), expected1);
-        assertEquals(messages2.get(1), expected2);
-        assertEquals(messages2.get(2), expected3);
+        assertEquals(messages2.get(0).position(), "a");
+        assertEquals(messages2.get(1).position(), "b");
+        assertEquals(messages2.get(2).position(), "c");
     }
 
     @Test

@@ -1,24 +1,28 @@
 package no.ssb.rawdata.lmdb;
 
+import de.huxhorn.sulky.ulid.ULID;
 import no.ssb.rawdata.api.RawdataClosedException;
 import no.ssb.rawdata.api.RawdataMessage;
 import no.ssb.rawdata.api.RawdataNotBufferedException;
 import no.ssb.rawdata.api.RawdataProducer;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 class LMDBRawdataProducer implements RawdataProducer {
 
     final int producerId;
     final String topic;
     final LMDBBackend lmdbBackend;
-    final Map<String, LMDBRawdataMessage> buffer = new ConcurrentHashMap<>();
+    final Map<String, LMDBRawdataMessage.Builder> buffer = new ConcurrentHashMap<>();
     final AtomicBoolean closed = new AtomicBoolean(false);
+
+    final ULID ulid = new ULID();
+    final AtomicReference<ULID.Value> previousIdRef = new AtomicReference<>(ulid.nextValue());
 
     LMDBRawdataProducer(int producerId, LMDBBackend lmdbBackend, String topic) {
         this.producerId = producerId;
@@ -36,44 +40,17 @@ class LMDBRawdataProducer implements RawdataProducer {
         if (isClosed()) {
             throw new RawdataClosedException(String.format("producer for is closed, topic: %s", topic));
         }
-        return new RawdataMessage.Builder() {
-            String position;
-            Map<String, byte[]> data = new LinkedHashMap<>();
-
-            @Override
-            public RawdataMessage.Builder position(String position) {
-                this.position = position;
-                return this;
-            }
-
-            @Override
-            public RawdataMessage.Builder put(String key, byte[] payload) {
-                data.put(key, payload);
-                return this;
-            }
-
-            @Override
-            public LMDBRawdataMessage build() {
-                return new LMDBRawdataMessage(position, data);
-            }
-        };
+        return new LMDBRawdataMessage.Builder();
     }
 
     @Override
-    public LMDBRawdataMessage buffer(RawdataMessage.Builder builder) throws RawdataClosedException {
+    public RawdataProducer buffer(RawdataMessage.Builder _builder) throws RawdataClosedException {
         if (isClosed()) {
             throw new RawdataClosedException(String.format("producer for is closed, topic: %s", topic));
         }
-        return buffer(builder.build());
-    }
-
-    @Override
-    public LMDBRawdataMessage buffer(RawdataMessage message) throws RawdataClosedException {
-        if (isClosed()) {
-            throw new RawdataClosedException(String.format("producer for is closed, topic: %s", topic));
-        }
-        buffer.put(message.position(), (LMDBRawdataMessage) message);
-        return (LMDBRawdataMessage) message;
+        LMDBRawdataMessage.Builder builder = (LMDBRawdataMessage.Builder) _builder;
+        buffer.put(builder.position, builder);
+        return this;
     }
 
     @Override
@@ -87,9 +64,22 @@ class LMDBRawdataProducer implements RawdataProducer {
             }
         }
         for (String position : positions) {
-            LMDBRawdataMessage payload = buffer.remove(position);
-            lmdbBackend.write(payload);
+            LMDBRawdataMessage.Builder builder = buffer.get(position);
+            builder.ulid(getOrGenerateNextUlid(builder));
+            lmdbBackend.write(builder.build());
         }
+    }
+
+    private ULID.Value getOrGenerateNextUlid(LMDBRawdataMessage.Builder builder) {
+        ULID.Value id = builder.ulid;
+        while (id == null) {
+            ULID.Value previousUlid = previousIdRef.get();
+            ULID.Value attemptedId = RawdataProducer.nextMonotonicUlid(this.ulid, previousUlid);
+            if (previousIdRef.compareAndSet(previousUlid, attemptedId)) {
+                id = attemptedId;
+            }
+        }
+        return id;
     }
 
     @Override
