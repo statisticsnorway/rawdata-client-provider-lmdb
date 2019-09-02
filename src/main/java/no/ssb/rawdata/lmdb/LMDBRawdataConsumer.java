@@ -94,7 +94,7 @@ class LMDBRawdataConsumer implements RawdataConsumer {
 
     @Override
     public void seek(long timestamp) {
-        cursorRef.set(new LMDBCursor(RawdataConsumer.beginningOfTime(timestamp), true, true));
+        cursorRef.set(new LMDBCursor(RawdataConsumer.beginningOf(timestamp), true, true));
     }
 
     @Override
