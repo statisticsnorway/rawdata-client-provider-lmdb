@@ -4,6 +4,7 @@ import de.huxhorn.sulky.ulid.ULID;
 import no.ssb.rawdata.api.RawdataClient;
 import no.ssb.rawdata.api.RawdataClosedException;
 import no.ssb.rawdata.api.RawdataConsumer;
+import no.ssb.rawdata.api.RawdataCursor;
 import no.ssb.rawdata.api.RawdataMessage;
 
 import java.nio.file.Path;
@@ -49,22 +50,27 @@ class LMDBRawdataClient implements RawdataClient {
     }
 
     @Override
-    public RawdataConsumer consumer(String topic, ULID.Value initialPosition, boolean inclusive) {
+    public RawdataConsumer consumer(String topic, RawdataCursor cursor) {
         LMDBBackend lmdbBackend = openLmdbBackendAndIncreaseReferenceCount(topic);
-        LMDBCursor initialCursor = initialPosition == null ? null : new LMDBCursor(initialPosition, inclusive, true);
-        LMDBRawdataConsumer consumer = new LMDBRawdataConsumer(producerAndConsumerIdGenerator.incrementAndGet(), lmdbBackend, topic, initialCursor);
+        LMDBRawdataConsumer consumer = new LMDBRawdataConsumer(producerAndConsumerIdGenerator.incrementAndGet(), lmdbBackend, topic, (LMDBCursor) cursor);
         consumers.add(consumer);
         return consumer;
     }
 
     @Override
-    public ULID.Value ulidOfPosition(String topic, String position) {
+    public RawdataCursor cursorOf(String topic, ULID.Value ulid, boolean inclusive) {
+        return new LMDBCursor(ulid, inclusive, true);
+    }
+
+    @Override
+    public RawdataCursor cursorOf(String topic, String position, boolean inclusive) {
         if (isClosed()) {
             throw new RawdataClosedException(String.format("producer for is closed, topic: %s", topic));
         }
         LMDBBackend lmdbBackend = openLmdbBackendAndIncreaseReferenceCount(topic);
         try {
-            return lmdbBackend.ulidOf(position);
+            ULID.Value ulidValue = lmdbBackend.ulidOf(position);
+            return new LMDBCursor(ulidValue, inclusive, true);
         } finally {
             lmdbBackend.close();
         }

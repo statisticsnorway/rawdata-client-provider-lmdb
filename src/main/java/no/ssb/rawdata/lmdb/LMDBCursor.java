@@ -1,12 +1,13 @@
 package no.ssb.rawdata.lmdb;
 
 import de.huxhorn.sulky.ulid.ULID;
+import no.ssb.rawdata.api.RawdataCursor;
 import org.lmdbjava.KeyRange;
 
 import java.nio.ByteBuffer;
 import java.util.Objects;
 
-class LMDBCursor {
+class LMDBCursor implements RawdataCursor {
 
     /**
      * Need not exactly match an existing ulid-value.
