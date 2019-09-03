@@ -9,6 +9,7 @@ import no.ssb.rawdata.api.RawdataMessage;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -63,7 +64,7 @@ class LMDBRawdataClient implements RawdataClient {
     }
 
     @Override
-    public RawdataCursor cursorOf(String topic, String position, boolean inclusive) {
+    public RawdataCursor cursorOf(String topic, String position, boolean inclusive, long approxTimestamp, Duration tolerance) {
         if (isClosed()) {
             throw new RawdataClosedException(String.format("producer for is closed, topic: %s", topic));
         }
