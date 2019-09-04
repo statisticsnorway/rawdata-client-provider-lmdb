@@ -6,6 +6,7 @@ import no.ssb.rawdata.api.RawdataClosedException;
 import no.ssb.rawdata.api.RawdataConsumer;
 import no.ssb.rawdata.api.RawdataCursor;
 import no.ssb.rawdata.api.RawdataMessage;
+import no.ssb.rawdata.api.RawdataNoSuchPositionException;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -71,6 +72,9 @@ class LMDBRawdataClient implements RawdataClient {
         LMDBBackend lmdbBackend = openLmdbBackendAndIncreaseReferenceCount(topic);
         try {
             ULID.Value ulidValue = lmdbBackend.ulidOf(position);
+            if (ulidValue == null) {
+                throw new RawdataNoSuchPositionException("Position not found: " + position);
+            }
             return new LMDBCursor(ulidValue, inclusive, true);
         } finally {
             lmdbBackend.close();
