@@ -340,6 +340,8 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
     public void close() {
         log.trace("{} {} -- close", toString(), path.toString());
         if (referenceCounter.decrementRefCount()) {
+            keyBufferPool.close();
+            contentDataBufferPool.close();
             data.close();
             sequence.close();
             index.close();
