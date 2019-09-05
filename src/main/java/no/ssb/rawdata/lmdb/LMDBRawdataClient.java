@@ -67,7 +67,7 @@ class LMDBRawdataClient implements RawdataClient {
     @Override
     public RawdataCursor cursorOf(String topic, String position, boolean inclusive, long approxTimestamp, Duration tolerance) {
         if (isClosed()) {
-            throw new RawdataClosedException(String.format("producer for is closed, topic: %s", topic));
+            throw new RawdataClosedException(String.format("rawdata-client is closed, topic: %s", topic));
         }
         LMDBBackend lmdbBackend = openLmdbBackendAndIncreaseReferenceCount(topic);
         try {
@@ -84,7 +84,7 @@ class LMDBRawdataClient implements RawdataClient {
     @Override
     public RawdataMessage lastMessage(String topic) throws RawdataClosedException {
         if (isClosed()) {
-            throw new RawdataClosedException(String.format("producer for is closed, topic: %s", topic));
+            throw new RawdataClosedException(String.format("rawdata-client is closed, topic: %s", topic));
         }
         LMDBBackend lmdbBackend = openLmdbBackendAndIncreaseReferenceCount(topic);
         try {
