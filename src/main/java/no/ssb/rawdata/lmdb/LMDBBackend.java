@@ -80,7 +80,7 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
      *                                  database using this instance.
      */
     LMDBBackend(Path path, long mapSize, int writeConcurrency, int readConcurrency, int maxMessageFileContentSize) {
-        log.trace("{} {} -- constructor", toString(), path.toString());
+        log.trace("{} {} -- constructor path={}, mapSize={}, writeConcurrency={}, readConcurrency={}, maxMessageFileContentSize={}", toString(), path.toString(), path.toAbsolutePath(), mapSize, writeConcurrency, readConcurrency, maxMessageFileContentSize);
         this.path = path;
         contentDataBufferPool = new DirectByteBufferPool(writeConcurrency, maxMessageFileContentSize);
         keyBufferPool = new DirectByteBufferPool((2 * writeConcurrency) + readConcurrency, 256);
