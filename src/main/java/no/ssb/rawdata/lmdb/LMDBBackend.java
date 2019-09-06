@@ -22,7 +22,10 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.NavigableMap;
+import java.util.TreeMap;
+
+import static java.util.Optional.ofNullable;
 
 
 /**
@@ -45,7 +48,7 @@ import java.util.stream.Collectors;
  * <p>
  * <li>sequence</li>
  * <ul>Key<li>ULID. offset: 0, length: 16 bytes, encoding: ULID.Value binary encoding</li></ul>
- * <ul>Value<li>Position. offset: 0, length: variable, encoding: UTF-8</li></ul>
+ * <ul>Value<li>length(position) (1 byte), position (UTF-8), length(orderingGroup) (1 byte), orderingGroup (UTF-8), sequenceNumber (8 bytes, long)</li></ul>
  * <p>
  * <li>index</li>
  * <ul>Key<li>Position. offset: 0, length: variable, encoding: UTF-8</li></ul>
@@ -54,6 +57,20 @@ import java.util.stream.Collectors;
  * <p>
  */
 class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
+
+    static class SequenceRecord {
+        final ULID.Value ulid;
+        final String position;
+        final String orderingGroup;
+        final long sequenceNumber;
+
+        SequenceRecord(ULID.Value ulid, String position, String orderingGroup, long sequenceNumber) {
+            this.ulid = ulid;
+            this.position = position;
+            this.orderingGroup = orderingGroup;
+            this.sequenceNumber = sequenceNumber;
+        }
+    }
 
     static final Logger log = LoggerFactory.getLogger(LMDBBackend.class);
 
@@ -83,7 +100,7 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
         log.trace("{} {} -- constructor path={}, mapSize={}, writeConcurrency={}, readConcurrency={}, maxMessageFileContentSize={}", toString(), path.toString(), path.toAbsolutePath(), mapSize, writeConcurrency, readConcurrency, maxMessageFileContentSize);
         this.path = path;
         contentDataBufferPool = new DirectByteBufferPool(writeConcurrency, maxMessageFileContentSize);
-        keyBufferPool = new DirectByteBufferPool((2 * writeConcurrency) + readConcurrency, 256);
+        keyBufferPool = new DirectByteBufferPool((2 * writeConcurrency) + readConcurrency, 512);
         try {
             Files.createDirectories(path);
         } catch (IOException e) {
@@ -143,10 +160,19 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
                 keyBuffer.flip();
                 ByteBuffer positionBuffer = keyBufferPool.acquire();
                 try {
-                    positionBuffer.put(message.position().getBytes(StandardCharsets.UTF_8));
-                    positionBuffer.flip();
+                    byte[] positionBytes = message.position().getBytes(StandardCharsets.UTF_8);
+                    byte[] orderingGroupBytes = ofNullable(message.orderingGroup()).map(og -> og.getBytes(StandardCharsets.UTF_8)).orElse(new byte[0]);
+                    if (2 + positionBytes.length + orderingGroupBytes.length + 4 > 511) {
+                        throw new RuntimeException("");
+                    }
+                    positionBuffer
+                            .put((byte) positionBytes.length)
+                            .put(positionBytes)
+                            .put((byte) orderingGroupBytes.length)
+                            .put(orderingGroupBytes)
+                            .putLong(message.sequenceNumber()).flip();
                     sequence.put(txn, keyBuffer, positionBuffer);
-                    index.put(txn, positionBuffer, keyBuffer);
+                    index.put(txn, positionBuffer.clear().put(positionBytes).flip(), keyBuffer);
                 } finally {
                     keyBufferPool.release(positionBuffer);
                 }
@@ -175,25 +201,33 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
                 return null; // sequence empty
             }
             CursorIterator.KeyVal<ByteBuffer> keyVal = iterator.next();
-            byte[] keyBytes = readBytes(keyVal.key(), 16);
-            ULID.Value key = ULID.fromBytes(keyBytes);
-            byte[] buf = readBytes(keyVal.val(), keyVal.val().remaining());
-            String position = new String(buf, StandardCharsets.UTF_8);
-            return readContentInRange(txn, Map.of(key, position), range, 1).stream().findFirst().orElse(null);
+            SequenceRecord sequenceRecord = readSequenceRecord(keyVal.key(), keyVal.val());
+            return readContentInRange(txn, Map.of(sequenceRecord.ulid, sequenceRecord), range, 1).stream().findFirst().orElse(null);
         }
     }
 
-    private List<ULIDAndPosition> doGetSequence(Txn<ByteBuffer> txn, KeyRange<ByteBuffer> range, int n) {
+    private NavigableMap<ULID.Value, SequenceRecord> doGetSequence(Txn<ByteBuffer> txn, KeyRange<ByteBuffer> range, int n) {
         try (CursorIterator<ByteBuffer> iterator = sequence.iterate(txn, range)) {
-            List<ULIDAndPosition> sequence = new ArrayList<>(n);
+            NavigableMap<ULID.Value, SequenceRecord> map = new TreeMap<>();
             for (int i = 0; i < n && iterator.hasNext(); i++) {
                 CursorIterator.KeyVal<ByteBuffer> keyVal = iterator.next();
-                ByteBuffer positionBytes = keyVal.val();
-                byte[] buf = readBytes(positionBytes, positionBytes.remaining());
-                sequence.add(new ULIDAndPosition(bytesToULID(keyVal.key()), new String(buf, StandardCharsets.UTF_8)));
+                SequenceRecord sequenceRecord = readSequenceRecord(keyVal.key(), keyVal.val());
+                map.put(sequenceRecord.ulid, sequenceRecord);
             }
-            return sequence;
+            return map;
         }
+    }
+
+    private SequenceRecord readSequenceRecord(ByteBuffer keyBuffer, ByteBuffer valueBuffer) {
+        ULID.Value key = bytesToULID(keyBuffer);
+        int positionLength = valueBuffer.get();
+        byte[] positionBuf = readBytes(valueBuffer, positionLength);
+        String position = new String(positionBuf, StandardCharsets.UTF_8);
+        int orderingGroupLength = valueBuffer.get();
+        byte[] orderingGroupBuf = readBytes(valueBuffer, orderingGroupLength);
+        String orderingGroup = orderingGroupBuf.length == 0 ? null : new String(orderingGroupBuf, StandardCharsets.UTF_8);
+        long sequenceNumber = valueBuffer.getLong();
+        return new SequenceRecord(key, position, orderingGroup, sequenceNumber);
     }
 
     /**
@@ -231,13 +265,11 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
             ByteBuffer startKeyBytes = keyBufferPool.acquire();
             try {
                 KeyRange<ByteBuffer> range = cursor.toKeyRange(startKeyBytes);
-                List<ULIDAndPosition> ulidAndPositionSequence = doGetSequence(txn, range, n);
-                if (ulidAndPositionSequence.isEmpty()) {
+                NavigableMap<ULID.Value, SequenceRecord> positionByUlid = doGetSequence(txn, range, n);
+                if (positionByUlid.isEmpty()) {
                     return Collections.emptyList();
                 }
-                Map<ULID.Value, String> positionByUlid = ulidAndPositionSequence.stream().collect(Collectors.toMap(e -> e.key, e -> e.position));
-
-                startKeyBytes.clear().put(ulidAndPositionSequence.get(0).key.toBytes()).flip();
+                startKeyBytes.clear().put(positionByUlid.firstKey().toBytes()).flip();
                 return readContentInRange(txn, positionByUlid, KeyRange.atLeast(startKeyBytes), n);
 
             } finally {
@@ -246,7 +278,7 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
         }
     }
 
-    private List<LMDBRawdataMessage> readContentInRange(Txn<ByteBuffer> txn, Map<ULID.Value, String> positionByUlid, KeyRange<ByteBuffer> range, int n) {
+    private List<LMDBRawdataMessage> readContentInRange(Txn<ByteBuffer> txn, Map<ULID.Value, SequenceRecord> sequenceValueByUlid, KeyRange<ByteBuffer> range, int n) {
         try (CursorIterator<ByteBuffer> iterator = data.iterate(txn, range)) {
             List<LMDBRawdataMessage> result = new ArrayList<>(n);
             Map<String, byte[]> messageData = null;
@@ -259,7 +291,8 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
                 ULID.Value key = ULID.fromBytes(keyBytes);
                 if (!Arrays.equals(prevKeyBytes, keyBytes)) {
                     if (prevKey != null) {
-                        result.add(new LMDBRawdataMessage(prevKey, positionByUlid.get(prevKey), messageData));
+                        SequenceRecord sequenceValue = sequenceValueByUlid.get(prevKey);
+                        result.add(new LMDBRawdataMessage(prevKey, sequenceValue.orderingGroup, sequenceValue.sequenceNumber, sequenceValue.position, messageData));
                     }
                     if (++i >= n) {
                         return result; // reached limit
@@ -268,37 +301,34 @@ class LMDBBackend extends JVMSuppressIllegalAccess implements AutoCloseable {
                     prevKeyBytes = keyBytes;
                     prevKey = key;
                 }
-                String name = contentNameOf(keyVal);
-                byte[] value = contentValueOf(keyVal);
+                String name = contentNameOf(keyVal.key());
+                byte[] value = contentValueOf(keyVal.val());
                 messageData.put(name, value);
             }
             if (prevKey != null) {
-                result.add(new LMDBRawdataMessage(prevKey, positionByUlid.get(prevKey), messageData));
+                SequenceRecord sequenceValue = sequenceValueByUlid.get(prevKey);
+                result.add(new LMDBRawdataMessage(prevKey, sequenceValue.orderingGroup, sequenceValue.sequenceNumber, sequenceValue.position, messageData));
             }
             return result; // reached end of stream
         }
     }
 
-    private String contentNameOf(CursorIterator.KeyVal<ByteBuffer> keyVal) {
-        byte[] buf = new byte[keyVal.key().limit() - 16];
-        keyVal.key().getLong();
-        keyVal.key().getLong();
-        keyVal.key().get(buf);
+    private String contentNameOf(ByteBuffer keyBuffer) {
+        byte[] buf = new byte[keyBuffer.limit() - 16];
+        keyBuffer.get(buf);
         String name = new String(buf, StandardCharsets.UTF_8);
         return name;
     }
 
-    private byte[] contentValueOf(CursorIterator.KeyVal<ByteBuffer> keyVal) {
-        byte[] value = new byte[keyVal.val().remaining()];
-        keyVal.val().get(value);
+    private byte[] contentValueOf(ByteBuffer valBuffer) {
+        byte[] value = new byte[valBuffer.remaining()];
+        valBuffer.get(value);
         return value;
     }
 
     private byte[] readBytes(ByteBuffer input, int n) {
-        int mark = input.position();
         byte[] buf = new byte[Math.min(input.remaining(), n)];
         input.get(buf);
-        input.position(mark);
         return buf;
     }
 
